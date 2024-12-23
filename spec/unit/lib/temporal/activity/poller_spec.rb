@@ -108,7 +108,7 @@ describe Temporal::Activity::Poller do
 
         expect(Temporal::Activity::TaskProcessor)
           .to have_received(:new)
-          .with(task, namespace, lookup, middleware_chain, config, heartbeat_thread_pool)
+          .with(task, task_queue, namespace, lookup, middleware_chain, config, heartbeat_thread_pool)
         expect(task_processor).to have_received(:process)
       end
 
@@ -143,7 +143,7 @@ describe Temporal::Activity::Poller do
           expect(Temporal::Middleware::Chain).to have_received(:new).with(middleware)
           expect(Temporal::Activity::TaskProcessor)
             .to have_received(:new)
-            .with(task, namespace, lookup, middleware_chain, config, heartbeat_thread_pool)
+            .with(task, task_queue, namespace, lookup, middleware_chain, config, heartbeat_thread_pool)
         end
       end
     end
@@ -198,6 +198,36 @@ describe Temporal::Activity::Poller do
       end
     end
   end
+
+  context 'when max_tasks_per_second is set' do
+    subject do
+      described_class.new(
+        namespace,
+        task_queue,
+        lookup,
+        config,
+        middleware,
+        {
+          max_tasks_per_second: 32
+        }
+      )
+    end
+
+    it 'sends PollActivityTaskQueue requests with the configured task rate-limit' do
+      times = poll(nil, times: 2)
+      expect(times).to be >= 2
+
+      expect(connection).to have_received(:poll_activity_task_queue)
+        .with(
+          namespace: namespace,
+          task_queue: task_queue,
+          max_tasks_per_second: 32
+        )
+        .at_least(2)
+        .times
+    end
+  end
+
 
   context 'when connection is unable to poll and poll_retry_seconds is set' do
     subject do

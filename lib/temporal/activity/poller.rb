@@ -11,7 +11,8 @@ module Temporal
     class Poller
       DEFAULT_OPTIONS = {
         thread_pool_size: 20,
-        poll_retry_seconds: 0
+        poll_retry_seconds: 0,
+        max_tasks_per_second: 0 # unlimited
       }.freeze
 
       def initialize(namespace, task_queue, activity_lookup, config, middleware = [], options = {})
@@ -61,6 +62,9 @@ module Temporal
       end
 
       def poll_loop
+        # Prevent the poller thread from silently dying
+        Thread.current.abort_on_exception = true
+
         last_poll_time = Time.now
         metrics_tags = { namespace: namespace, task_queue: task_queue }.freeze
 
@@ -88,7 +92,8 @@ module Temporal
       end
 
       def poll_for_task
-        connection.poll_activity_task_queue(namespace: namespace, task_queue: task_queue)
+        connection.poll_activity_task_queue(namespace: namespace, task_queue: task_queue,
+                                            max_tasks_per_second: max_tasks_per_second)
       rescue ::GRPC::Cancelled
         # We're shutting down and we've already reported that in the logs
         nil
@@ -105,16 +110,21 @@ module Temporal
       def process(task)
         middleware_chain = Middleware::Chain.new(middleware)
 
-        TaskProcessor.new(task, namespace, activity_lookup, middleware_chain, config, heartbeat_thread_pool).process
+        TaskProcessor.new(task, task_queue, namespace, activity_lookup, middleware_chain, config, heartbeat_thread_pool).process
       end
 
       def poll_retry_seconds
         @options[:poll_retry_seconds]
       end
 
+      def max_tasks_per_second
+        @options[:max_tasks_per_second]
+      end
+
       def thread_pool
         @thread_pool ||= ThreadPool.new(
           options[:thread_pool_size],
+          @config,
           {
             pool_name: 'activity_task_poller',
             namespace: namespace,
@@ -126,6 +136,7 @@ module Temporal
       def heartbeat_thread_pool
         @heartbeat_thread_pool ||= ScheduledThreadPool.new(
           options[:thread_pool_size],
+          @config,
           {
             pool_name: 'heartbeat',
             namespace: namespace,

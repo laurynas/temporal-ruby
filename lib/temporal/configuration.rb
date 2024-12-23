@@ -1,3 +1,5 @@
+require 'temporal/capabilities'
+require 'temporal/converter_wrapper'
 require 'temporal/logger'
 require 'temporal/metrics_adapters/null'
 require 'temporal/middleware/header_propagator_chain'
@@ -11,14 +13,15 @@ require 'temporal/connection/converter/codec/chain'
 
 module Temporal
   class Configuration
-    Connection = Struct.new(:type, :host, :port, :credentials, :identity, keyword_init: true)
+    Connection = Struct.new(:type, :host, :port, :credentials, :identity, :converter, :connection_options, keyword_init: true)
     Execution = Struct.new(:namespace, :task_queue, :timeouts, :headers, :search_attributes, keyword_init: true)
 
     attr_reader :timeouts, :error_handlers
     attr_writer :credentials
     attr_accessor :connection_type, :converter, :use_error_serialization_v2, :host, :port, :identity,
                   :logger, :metrics_adapter, :namespace, :task_queue, :headers, :search_attributes, :header_propagators,
-                  :payload_codec
+                  :legacy_signals, :no_signals_in_first_task, :connection_options, :log_on_workflow_replay,
+                  :credentials
 
     # See https://docs.temporal.io/blog/activity-timeouts/ for general docs.
     # We want an infinite execution timeout for cron schedules and other perpetual workflows.
@@ -58,7 +61,7 @@ module Temporal
         Temporal::Connection::Converter::Payload::JSON.new
       ]
     ).freeze
-    
+
     # The Payload Codec is an optional step that happens between the wire and the Payload Converter:
     # Temporal Server <--> Wire <--> Payload Codec <--> Payload Converter <--> User code
     # which can be useful for transformations such as compression and encryption
@@ -83,6 +86,22 @@ module Temporal
       @identity = nil
       @search_attributes = {}
       @header_propagators = []
+      @capabilities = Capabilities.new(self)
+      @connection_options = {}
+      # Setting this to true can be useful when debugging workflow code or running replay tests
+      @log_on_workflow_replay = false
+
+      # Signals previously were incorrectly replayed in order within a workflow task window, rather
+      # than at the beginning. Correcting this changes the determinism of any workflow with signals.
+      # This flag exists to force this legacy behavior to gradually roll out the new ordering.
+      # Because this feature depends on the SDK Metadata capability which only became available
+      # in Temporal server 1.20, it is ignored when connected to older versions and effectively
+      # treated as true.
+      @legacy_signals = false
+
+      # This is a legacy behavior that is incorrect, but which existing workflow code may rely on. Only
+      # set to true until you can fix your workflow code.
+      @no_signals_in_first_task = false
     end
 
     def on_error(&block)
@@ -113,7 +132,9 @@ module Temporal
         host: host,
         port: port,
         credentials: credentials,
-        identity: identity || default_identity
+        identity: identity || default_identity,
+        converter: converter,
+        connection_options: connection_options.merge(use_error_serialization_v2: use_error_serialization_v2)
       ).freeze
     end
 
@@ -129,11 +150,26 @@ module Temporal
 
     def add_header_propagator(propagator_class, *args)
       raise 'header propagator must implement `def inject!(headers)`' unless propagator_class.method_defined? :inject!
+
       @header_propagators << Middleware::Entry.new(propagator_class, args)
     end
 
     def header_propagator_chain
       Middleware::HeaderPropagatorChain.new(header_propagators)
+    end
+
+    def converter
+      @converter_wrapper ||= ConverterWrapper.new(@converter, @payload_codec)
+    end
+
+    def converter=(new_converter)
+      @converter = new_converter
+      @converter_wrapper = nil
+    end
+
+    def payload_codec=(new_codec)
+      @payload_codec = new_codec
+      @converter_wrapper = nil
     end
 
     private

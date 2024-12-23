@@ -9,6 +9,9 @@ module Temporal
   # a non-deterministic workflow implementation or the gem's bug
   class NonDeterministicWorkflowError < InternalError; end
 
+  # Indicates a workflow task was encountered that used an unknown SDK flag
+  class UnknownSDKFlagError < InternalError; end
+
   # Superclass for misconfiguration/misuse on the client (user) side
   class ClientError < Error; end
 
@@ -23,7 +26,7 @@ module Temporal
 
   # A superclass for activity exceptions raised explicitly
   # with the intent to propagate to a workflow
-  # With v2 serialization (set with Temporal.configuration set with use_error_serialization_v2=true) you can
+  # With v2 serialization (set with Temporal::Configuration#use_error_serialization_v2=true) you can
   # throw any exception from an activity and expect that it can be handled by the workflow.
   class ActivityException < ClientError; end
 
@@ -49,8 +52,10 @@ module Temporal
 
   # Errors where the workflow run didn't complete but not an error for the whole workflow.
   class WorkflowRunError < Error; end
+
   class WorkflowRunContinuedAsNew < WorkflowRunError
     attr_reader :new_run_id
+
     def initialize(new_run_id:)
       super
       @new_run_id = new_run_id
@@ -72,6 +77,7 @@ module Temporal
       @run_id = run_id
     end
   end
+
   class NamespaceNotActiveFailure < ApiError; end
   class ClientVersionNotSupportedFailure < ApiError; end
   class FeatureVersionNotSupportedFailure < ApiError; end

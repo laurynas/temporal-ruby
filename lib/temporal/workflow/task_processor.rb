@@ -9,23 +9,22 @@ require 'temporal/metric_keys'
 module Temporal
   class Workflow
     class TaskProcessor
-      Query = Struct.new(:query) do
-        include Concerns::Payloads
-
+      Query = Struct.new(:query, :converter) do
         def query_type
           query.query_type
         end
 
         def query_args
-          from_query_payloads(query.query_args)
+          converter.from_query_payloads(query.query_args)
         end
       end
 
       MAX_FAILED_ATTEMPTS = 1
       LEGACY_QUERY_KEY = :legacy_query
 
-      def initialize(task, namespace, workflow_lookup, middleware_chain, workflow_middleware_chain, config, binary_checksum)
+      def initialize(task, task_queue, namespace, workflow_lookup, middleware_chain, workflow_middleware_chain, config, binary_checksum)
         @task = task
+        @task_queue = task_queue
         @namespace = namespace
         @metadata = Metadata.generate_workflow_task_metadata(task, namespace)
         @task_token = task.task_token
@@ -41,11 +40,9 @@ module Temporal
         start_time = Time.now
 
         Temporal.logger.debug("Processing Workflow task", metadata.to_h)
-        Temporal.metrics.timing(Temporal::MetricKeys::WORKFLOW_TASK_QUEUE_TIME, queue_time_ms, workflow: workflow_name, namespace: namespace)
+        Temporal.metrics.timing(Temporal::MetricKeys::WORKFLOW_TASK_QUEUE_TIME, queue_time_ms, metric_tags)
 
-        if !workflow_class
-          raise Temporal::WorkflowNotRegistered, 'Workflow is not registered with this worker'
-        end
+        raise Temporal::WorkflowNotRegistered, 'Workflow is not registered with this worker' unless workflow_class
 
         history = fetch_full_history
         queries = parse_queries
@@ -54,9 +51,10 @@ module Temporal
         track_stack_trace = queries.values.map(&:query_type).include?(StackTraceTracker::STACK_TRACE_QUERY_NAME)
 
         # TODO: For sticky workflows we need to cache the Executor instance
-        executor = Workflow::Executor.new(workflow_class, history, metadata, config, track_stack_trace, workflow_middleware_chain)
+        executor = Workflow::Executor.new(workflow_class, history, metadata, config, track_stack_trace,
+                                          workflow_middleware_chain)
 
-        commands = middleware_chain.invoke(metadata) do
+        run_result = middleware_chain.invoke(metadata) do
           executor.run
         end
 
@@ -65,22 +63,30 @@ module Temporal
         if legacy_query_task?
           complete_query(query_results[LEGACY_QUERY_KEY])
         else
-          complete_task(commands, query_results)
+          complete_task(run_result, query_results)
         end
-      rescue StandardError => error
-        Temporal::ErrorHandler.handle(error, config, metadata: metadata)
+      rescue StandardError => e
+        Temporal::ErrorHandler.handle(e, config, metadata: metadata)
 
-        fail_task(error)
+        fail_task(e)
       ensure
         time_diff_ms = ((Time.now - start_time) * 1000).round
-        Temporal.metrics.timing(Temporal::MetricKeys::WORKFLOW_TASK_LATENCY, time_diff_ms, workflow: workflow_name, namespace: namespace)
-        Temporal.logger.debug("Workflow task processed", metadata.to_h.merge(execution_time: time_diff_ms))
+        Temporal.metrics.timing(Temporal::MetricKeys::WORKFLOW_TASK_LATENCY, time_diff_ms, metric_tags)
+        Temporal.logger.debug('Workflow task processed', metadata.to_h.merge(execution_time: time_diff_ms))
+      end
+
+      def metric_tags
+        {
+          workflow: workflow_name,
+          namespace: namespace,
+          task_queue: task_queue
+        }
       end
 
       private
 
-      attr_reader :task, :namespace, :task_token, :workflow_name, :workflow_class,
-        :middleware_chain, :workflow_middleware_chain, :metadata, :config, :binary_checksum
+      attr_reader :task, :task_queue, :namespace, :task_token, :workflow_name, :workflow_class,
+                  :middleware_chain, :workflow_middleware_chain, :metadata, :config, :binary_checksum
 
       def connection
         @connection ||= Temporal::Connection.generate(config.for_connection)
@@ -95,7 +101,7 @@ module Temporal
       def fetch_full_history
         events = task.history.events.to_a
         next_page_token = task.next_page_token
-        while !next_page_token.empty? do
+        until next_page_token.empty?
           response = connection.get_workflow_execution_history(
             namespace: namespace,
             workflow_id: task.workflow_execution.workflow_id,
@@ -117,42 +123,43 @@ module Temporal
       def parse_queries
         # Support for deprecated query style
         if legacy_query_task?
-          { LEGACY_QUERY_KEY => Query.new(task.query) }
+          { LEGACY_QUERY_KEY => Query.new(task.query, config.converter) }
         else
           task.queries.each_with_object({}) do |(query_id, query), result|
-            result[query_id] = Query.new(query)
+            result[query_id] = Query.new(query, config.converter)
           end
         end
       end
 
-      def complete_task(commands, query_results)
-        Temporal.logger.info("Workflow task completed", metadata.to_h)
+      def complete_task(run_result, query_results)
+        Temporal.logger.info('Workflow task completed', metadata.to_h)
 
         connection.respond_workflow_task_completed(
           namespace: namespace,
           task_token: task_token,
-          commands: commands,
+          commands: run_result.commands,
           binary_checksum: binary_checksum,
-          query_results: query_results
+          query_results: query_results,
+          new_sdk_flags_used: run_result.new_sdk_flags_used
         )
       end
 
       def complete_query(result)
-        Temporal.logger.info("Workflow Query task completed", metadata.to_h)
+        Temporal.logger.info('Workflow Query task completed', metadata.to_h)
 
         connection.respond_query_task_completed(
           namespace: namespace,
           task_token: task_token,
           query_result: result
         )
-      rescue StandardError => error
-        Temporal.logger.error("Unable to complete a query", metadata.to_h.merge(error: error.inspect))
+      rescue StandardError => e
+        Temporal.logger.error('Unable to complete a query', metadata.to_h.merge(error: e.inspect))
 
-        Temporal::ErrorHandler.handle(error, config, metadata: metadata)
+        Temporal::ErrorHandler.handle(e, config, metadata: metadata)
       end
 
       def fail_task(error)
-        Temporal.metrics.increment(Temporal::MetricKeys::WORKFLOW_TASK_EXECUTION_FAILED, workflow: workflow_name, namespace: namespace)
+        Temporal.metrics.increment(Temporal::MetricKeys::WORKFLOW_TASK_EXECUTION_FAILED, metric_tags)
         Temporal.logger.error('Workflow task failed', metadata.to_h.merge(error: error.inspect))
         Temporal.logger.debug(error.backtrace.join("\n"))
 
@@ -168,10 +175,10 @@ module Temporal
           exception: error,
           binary_checksum: binary_checksum
         )
-      rescue StandardError => error
-        Temporal.logger.error("Unable to fail Workflow task", metadata.to_h.merge(error: error.inspect))
+      rescue StandardError => e
+        Temporal.logger.error('Unable to fail Workflow task', metadata.to_h.merge(error: e.inspect))
 
-        Temporal::ErrorHandler.handle(error, config, metadata: metadata)
+        Temporal::ErrorHandler.handle(e, config, metadata: metadata)
       end
     end
   end

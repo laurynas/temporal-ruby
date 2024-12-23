@@ -90,7 +90,8 @@ Temporal::Worker.new(
   workflow_thread_pool_size: 10, # how many threads poll for workflows
   binary_checksum: nil, # identifies the version of workflow worker code
   activity_poll_retry_seconds: 0, # how many seconds to wait after unsuccessful poll for activities
-  workflow_poll_retry_seconds: 0  # how many seconds to wait after unsuccessful poll for workflows
+  workflow_poll_retry_seconds: 0, # how many seconds to wait after unsuccessful poll for workflows
+  activity_max_tasks_per_second: 0 # rate-limit for starting activity tasks (new activities + retries) on the task queue
 )
 ```
 
@@ -177,6 +178,47 @@ Temporal.configure do |config|
     )
 end
 ```
+
+## Configuration
+
+This gem is optimised for the smoothest out-of-the-box experience, which is achieved using a global
+configuration:
+
+```ruby
+Temporal.configure do |config|
+  config.host = '127.0.0.1' # sets global host
+  ...
+end
+
+Temporal::Worker.new # uses global host
+Temporal.start_workflow(...) # uses global host
+```
+
+This will work just fine for simpler use-cases, however at some point you might need to setup
+multiple clients and workers within the same instance of your app (e.g. you have different Temporal
+hosts, need to use different codecs/converters for different parts of your app, etc). Should this be
+the case we recommend using explicit local configurations for each client/worker:
+
+```ruby
+config_1 = Temporal::Configuration.new
+config_1.host = 'temporal-01'
+
+config_2 = Temporal::Configuration.new
+config_2.host = 'temporal-01'
+
+worker_1 = Temporal::Worker.new(config_1)
+worker_2 = Temporal::Worker.new(config_2)
+
+client_1 = Temporal::Client.new(config_1)
+client_1.start_workflow(...)
+
+client_2 = Temporal::Client.new(config_2)
+client_2.start_workflow(...)
+```
+
+*NOTE: Almost all the methods on the `Temporal` module are delegated to the default client that's
+initialized using global configuration. The same methods can be used directly on your own client
+instances.*
 
 ## Workflows
 
@@ -400,6 +442,36 @@ arguments are identical to the `Temporal.start_workflow` API.
 set it to allow as many invocations as you need. You can also set it to `nil`, which will use a
 default value of 10 years.*
 
+## Middleware
+Middleware sits between the execution of your workflows/activities and the Temporal SDK, allowing you to insert custom code before or after the execution.
+
+### Activity Middleware Stack
+Middleware added to the activity middleware stack will be executed around each activity method. This is useful when you want to perform a certain task before and/or after each activity execution, such as logging, error handling, or measuring execution time.
+
+### Workflow Middleware Stack
+There are actually two types of workflow middleware in Temporal Ruby SDK:
+
+*Workflow Middleware*: This middleware is executed around each entire workflow. This is similar to activity middleware, but for workflows.
+
+*Workflow Task Middleware*: This middleware is executed around each workflow task, of which there will be many for each workflow.
+
+### Example
+To add a middleware, you need to define a class that responds to the call method. Within the call method, you should call yield to allow the next middleware in the stack (or the workflow/activity method itself if there are no more middlewares) to execute. Here's an example:
+
+```
+class MyMiddleware
+  def call(metadata)
+    puts "Before execution"
+    yield
+    puts "After execution"
+    result
+  end
+end
+```
+
+You can add this middleware to the stack like so `worker.add_activity_middleware(MyMiddleware)`
+
+Please note that the order of middleware in the stack matters. The middleware that is added last will be the first one to execute. In the example above, MyMiddleware will execute before any other middleware in the stack.
 
 ## Breaking Changes
 

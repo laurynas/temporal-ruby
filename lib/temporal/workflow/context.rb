@@ -47,8 +47,10 @@ module Temporal
       end
 
       def logger
-        @logger ||= ReplayAwareLogger.new(Temporal.logger)
-        @logger.replay = state_manager.replay?
+        @logger ||= ReplayAwareLogger.new(
+          @config.logger,
+          replaying: -> { state_manager.replay? && !@config.log_on_workflow_replay }
+        )
         @logger
       end
 
@@ -65,6 +67,12 @@ module Temporal
 
       def has_release?(release_name)
         state_manager.release?(release_name.to_s)
+      end
+
+      # Returns information about the workflow run's history up to this point. This can be used to
+      # determine when to continue as new.
+      def history_size
+        state_manager.history_size
       end
 
       def execute_activity(activity_class, *input, **args)
@@ -343,15 +351,31 @@ module Temporal
       #
       # @param signal_name [String, Symbol, nil] an optional signal name; converted to a String
       def on_signal(signal_name = nil, &block)
+        first_task_signals = if state_manager.sdk_flags.include?(SDKFlags::SAVE_FIRST_TASK_SIGNALS)
+          state_manager.first_task_signals
+        else
+          []
+        end
+
         if signal_name
           target = Signal.new(signal_name)
           dispatcher.register_handler(target, 'signaled') do |_, input|
             # do not pass signal name when triggering a named handler
             call_in_fiber(block, input)
           end
+
+          first_task_signals.each do |name, input|
+            if name == signal_name
+              call_in_fiber(block, input)
+            end
+          end
         else
           dispatcher.register_handler(Dispatcher::WILDCARD, 'signaled') do |signal, input|
             call_in_fiber(block, signal, input)
+          end
+
+          first_task_signals.each do |name, input|
+            call_in_fiber(block, name, input)
           end
         end
 

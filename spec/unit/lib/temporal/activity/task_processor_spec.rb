@@ -5,9 +5,10 @@ require 'temporal/middleware/chain'
 require 'temporal/scheduled_thread_pool'
 
 describe Temporal::Activity::TaskProcessor do
-  subject { described_class.new(task, namespace, lookup, middleware_chain, config, heartbeat_thread_pool) }
+  subject { described_class.new(task, task_queue, namespace, lookup, middleware_chain, config, heartbeat_thread_pool) }
 
   let(:namespace) { 'test-namespace' }
+  let(:task_queue) { 'test-queue' }
   let(:lookup) { instance_double('Temporal::ExecutableLookup', find: nil) }
   let(:task) do
     Fabricate(
@@ -16,18 +17,21 @@ describe Temporal::Activity::TaskProcessor do
       input: config.converter.to_payloads(input)
     )
   end
-  let(:metadata) { Temporal::Metadata.generate_activity_metadata(task, namespace) }
+  let(:metadata) { Temporal::Metadata.generate_activity_metadata(task, namespace, config.converter) }
   let(:workflow_name) { task.workflow_type.name }
   let(:activity_name) { 'TestActivity' }
   let(:connection) { instance_double('Temporal::Connection::GRPC') }
   let(:middleware_chain) { Temporal::Middleware::Chain.new }
   let(:config) { Temporal::Configuration.new }
-  let(:heartbeat_thread_pool) { Temporal::ScheduledThreadPool.new(2, {}) }
+  let(:heartbeat_thread_pool) { Temporal::ScheduledThreadPool.new(2, config, {}) }
   let(:input) { %w[arg1 arg2] }
 
   describe '#process' do
     let(:heartbeat_check_scheduled) { nil }
-    let(:context) { instance_double('Temporal::Activity::Context', async?: false, heartbeat_check_scheduled: heartbeat_check_scheduled) }
+    let(:context) do
+      instance_double('Temporal::Activity::Context', async?: false,
+                                                     heartbeat_check_scheduled: heartbeat_check_scheduled)
+    end
 
     before do
       allow(Temporal::Connection)
@@ -36,9 +40,10 @@ describe Temporal::Activity::TaskProcessor do
         .and_return(connection)
       allow(Temporal::Metadata)
         .to receive(:generate_activity_metadata)
-        .with(task, namespace)
+        .with(task, namespace, config.converter)
         .and_return(metadata)
-      allow(Temporal::Activity::Context).to receive(:new).with(connection, metadata, config, heartbeat_thread_pool).and_return(context)
+      allow(Temporal::Activity::Context).to receive(:new).with(connection, metadata, config,
+                                                               heartbeat_thread_pool).and_return(context)
 
       allow(connection).to receive(:respond_activity_task_completed)
       allow(connection).to receive(:respond_activity_task_failed)
@@ -119,7 +124,9 @@ describe Temporal::Activity::TaskProcessor do
         end
 
         context 'when there is an outstanding scheduled heartbeat' do
-          let(:heartbeat_check_scheduled) { Temporal::ScheduledThreadPool::ScheduledItem.new(id: :foo, canceled: false) }
+          let(:heartbeat_check_scheduled) do
+            Temporal::ScheduledThreadPool::ScheduledItem.new(id: :foo, canceled: false)
+          end
           it 'it gets canceled' do
             subject.process
 
@@ -143,9 +150,11 @@ describe Temporal::Activity::TaskProcessor do
             .with(
               Temporal::MetricKeys::ACTIVITY_TASK_QUEUE_TIME,
               an_instance_of(Integer),
-              activity: activity_name,
-              namespace: namespace,
-              workflow: workflow_name
+              hash_including({
+                activity: activity_name,
+                namespace: namespace,
+                workflow: workflow_name
+              })
             )
         end
 
@@ -159,6 +168,7 @@ describe Temporal::Activity::TaskProcessor do
               an_instance_of(Integer),
               activity: activity_name,
               namespace: namespace,
+              task_queue: task_queue,
               workflow: workflow_name
             )
         end
@@ -234,9 +244,11 @@ describe Temporal::Activity::TaskProcessor do
             .with(
               Temporal::MetricKeys::ACTIVITY_TASK_QUEUE_TIME,
               an_instance_of(Integer),
-              activity: activity_name,
-              namespace: namespace,
-              workflow: workflow_name
+              hash_including({
+                activity: activity_name,
+                namespace: namespace,
+                workflow: workflow_name
+              })
             )
         end
 
@@ -250,6 +262,7 @@ describe Temporal::Activity::TaskProcessor do
               an_instance_of(Integer),
               activity: activity_name,
               namespace: namespace,
+              task_queue: task_queue,
               workflow: workflow_name
             )
         end
