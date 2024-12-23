@@ -20,8 +20,7 @@ module Temporal
     attr_writer :credentials
     attr_accessor :connection_type, :converter, :use_error_serialization_v2, :host, :port, :identity,
                   :logger, :metrics_adapter, :namespace, :task_queue, :headers, :search_attributes, :header_propagators,
-                  :legacy_signals, :no_signals_in_first_task, :connection_options, :log_on_workflow_replay,
-                  :credentials
+                  :legacy_signals, :no_signals_in_first_task, :connection_options, :log_on_workflow_replay
 
     # See https://docs.temporal.io/blog/activity-timeouts/ for general docs.
     # We want an infinite execution timeout for cron schedules and other perpetual workflows.
