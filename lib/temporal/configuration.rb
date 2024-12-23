@@ -18,7 +18,7 @@ module Temporal
 
     attr_reader :timeouts, :error_handlers, :capabilities, :payload_codec
     attr_writer :credentials
-    attr_accessor :connection_type, :converter, :use_error_serialization_v2, :host, :port, :identity,
+    attr_accessor :connection_type, :use_error_serialization_v2, :host, :port, :identity,
                   :logger, :metrics_adapter, :namespace, :task_queue, :headers, :search_attributes, :header_propagators,
                   :legacy_signals, :no_signals_in_first_task, :connection_options, :log_on_workflow_replay
 
