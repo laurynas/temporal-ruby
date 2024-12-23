@@ -16,7 +16,7 @@ module Temporal
     Connection = Struct.new(:type, :host, :port, :credentials, :identity, :converter, :connection_options, keyword_init: true)
     Execution = Struct.new(:namespace, :task_queue, :timeouts, :headers, :search_attributes, keyword_init: true)
 
-    attr_reader :timeouts, :error_handlers
+    attr_reader :timeouts, :error_handlers, :capabilities, :payload_codec
     attr_writer :credentials
     attr_accessor :connection_type, :converter, :use_error_serialization_v2, :host, :port, :identity,
                   :logger, :metrics_adapter, :namespace, :task_queue, :headers, :search_attributes, :header_propagators,
